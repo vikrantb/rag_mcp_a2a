@@ -6,9 +6,17 @@
       "https://help.98point6.com/td/98point6-console",
       "https://help.98point6.com/td/support"
     ],
-    "allow_patterns": ["/td/"],
-    "deny_patterns": ["/search", "/login", "[?#]preview="],
-    "allowed_domains": ["help.98point6.com"],
+    "allow_patterns": [
+      "/td/"
+    ],
+    "deny_patterns": [
+      "/search",
+      "/login",
+      "[?#]preview="
+    ],
+    "allowed_domains": [
+      "help.98point6.com"
+    ],
     "same_host": true,
     "max_pages": 300,
     "max_depth": 5,
@@ -16,7 +24,9 @@
     "delay_seconds": 0.6,
     "timeout_seconds": 10.0,
     "user_agent": "RAG-DiscoveryBot/1.0 (+https://yourdomain.example)",
-    "crawl_as_human": false
+    "crawl_as_human": false,
+    "force_redownload_from_web": false,
+    "force_reparse_from_assets": false
   },
   "outputs": {
     "assets_dir": "assets_98point6",

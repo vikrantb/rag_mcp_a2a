@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 
 # --- Config helpers ---
-DEFAULT_CONFIG_PATH = "config.json"
+DEFAULT_CONFIG_PATH = "98point6_config.json"
 
 def read_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -18,7 +18,7 @@ def resolve_chunks_path(args_chunks: str, cfg_path: str) -> str:
     # Priority 1: explicit CLI path
     if args_chunks:
         return args_chunks
-    # Priority 2: outputs.chunks_jsonl_path in config.json
+    # Priority 2: outputs.chunks_jsonl_path in 98point6_config.json
     try:
         cfg = read_config(cfg_path)
         out = cfg.get("outputs", {})
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     ap.add_argument("--chunks", dest="chunks_jsonl", default=None,
                     help="Path to chunks JSONL. If omitted, will read outputs.chunks_jsonl_path from --config.")
     ap.add_argument("--config", default=DEFAULT_CONFIG_PATH,
-                    help="Path to config.json (used only to resolve default chunks path).")
+                    help="Path to 98point6_config.json (used only to resolve default chunks path).")
     ap.add_argument("--out", default="index",
                     help="Output directory for the built index.")
     args = ap.parse_args()

@@ -7,9 +7,9 @@ Simple, modular crawl → parse → chunk pipeline
 - Clean, reusable classes: Crawler, Parser, Chunker
 
 Run:
-  python web_crawler.py --config config.json
+  python web_crawler.py --config 98point6_config.json
 
-Example config (save as config.json and edit as needed):
+Example config (save as 98point6_config.json and edit as needed):
 {
   "crawl": {
     "seed_urls": ["https://help.98point6.com/"],
@@ -23,7 +23,9 @@ Example config (save as config.json and edit as needed):
     "delay_seconds": 0.6,
     "timeout_seconds": 10.0,
     "user_agent": "RAG-DiscoveryBot/1.0 (+https://yourdomain.example)",
-    "crawl_as_human": false
+    "crawl_as_human": false,
+    "force_redownload_from_web": false,
+    "force_reparse_from_assets": false
   },
   "outputs": {
     "assets_dir": "assets_98point6",
@@ -78,6 +80,8 @@ class CrawlConfig:
     timeout_seconds: float = 10.0
     user_agent: str = "RAG-DiscoveryBot/1.0"
     crawl_as_human: bool = False
+    force_redownload_from_web: bool = False
+    force_reparse_from_assets: bool = False
 
 @dataclass
 class OutputConfig:
@@ -92,7 +96,11 @@ class ChunkConfig:
     overlap_tokens: int = 100
     site: t.Optional[str] = None
 
+#
 # ===== helpers =====
+
+# Manifest file for cached HTML assets
+CACHE_MANIFEST = "cache_manifest.jsonl"
 def canonicalize(u: str) -> str:
     p = urlparse(u)
     if p.scheme not in ("http", "https"):
@@ -109,6 +117,26 @@ def same_site_ok(url: str, seed_hosts: t.Set[str]) -> bool:
 
 def compile_patterns(patterns: t.List[str]) -> t.List[re.Pattern]:
     return [re.compile(p) for p in patterns]
+
+# Consistent docid for URL (used for cache and assets)
+def url_to_docid(url: str) -> str:
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+
+# Infer canonical URL from HTML (og:url or <link rel="canonical">)
+def infer_url_from_html(html: str) -> t.Optional[str]:
+    try:
+        if BeautifulSoup is None:
+            return None
+        soup = BeautifulSoup(html, "html.parser")
+        m = soup.find("meta", attrs={"property": "og:url"})
+        if m and m.get("content"):
+            return canonicalize(m["content"].strip())
+        link = soup.find("link", rel=re.compile("canonical", re.I))
+        if link and link.get("href"):
+            return canonicalize(link["href"].strip())
+    except Exception:
+        pass
+    return None
 
 # ===== crawler =====
 class Crawler:
@@ -128,7 +156,7 @@ class Crawler:
         if self.cfg.crawl_as_human:
             self.cfg.respect_robots = False
             # At least 2s between requests to mimic a human skim
-            self.cfg.delay_seconds = max(self.cfg.delay_seconds, 5.0)
+            self.cfg.delay_seconds = max(self.cfg.delay_seconds, 2.0)
             # Use a common browser-like UA string (still honest)
             self.session.headers.update({
                 "User-Agent": self.cfg.user_agent or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -460,17 +488,56 @@ class Chunker:
 def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser, out_path: str, assets_dir: str, max_items: int = 100) -> int:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     count = 0
+    manifest_path = os.path.join(assets_dir, CACHE_MANIFEST)
     with open(out_path, "w", encoding="utf-8") as f:
         for i, u in enumerate(urls):
             if i >= max_items:
                 break
             if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
                 print(f"[PARSE] fetching: {u}")
-            html = crawler.fetch_html(u)
+            # Try local cache first if allowed
+            docid = url_to_docid(u)
+            raw_dir = os.path.join(assets_dir, "raw_html")
+            raw_path = os.path.join(raw_dir, f"{docid}.html")
+            html = None
+            if (not crawler.cfg.force_redownload_from_web) and os.path.isfile(raw_path):
+                try:
+                    with open(raw_path, "r", encoding="utf-8") as rf:
+                        html = rf.read()
+                    if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
+                        print(f"[PARSE] cache(hit): {u}")
+                except Exception:
+                    html = None
+
+            # If no cache or forced, fetch from web
+            if html is None:
+                html = crawler.fetch_html(u)
+                if html and not crawler.cfg.force_redownload_from_web:
+                    # Persist to cache for future offline runs
+                    os.makedirs(raw_dir, exist_ok=True)
+                    try:
+                        with open(raw_path, "w", encoding="utf-8") as wf:
+                            wf.write(html)
+                    except Exception:
+                        pass
+
             if not html:
                 if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
                     print(f"[PARSE] skip(fetch_fail): {u}")
                 continue
+
+            # Record in cache manifest for offline reparse
+            try:
+                os.makedirs(assets_dir, exist_ok=True)
+                with open(manifest_path, "a", encoding="utf-8") as mf:
+                    mf.write(json.dumps({
+                        "doc_id": docid,
+                        "url": u,
+                        "raw_html_path": raw_path
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+
             rec = parser.parse_article(html, u)
             if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
                 print(f"[PARSE] ok: title='{(rec.get('title') or '')[:60]}' chars={rec.get('char_len',0)}")
@@ -480,11 +547,88 @@ def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser
                 continue
             # attach raw html for asset saving
             rec["raw_html"] = html
-            rec["doc_id"] = Chunker._doc_id(u)
+            rec["doc_id"] = url_to_docid(u)
             # we defer writing raw assets to the chunk/save phase
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             count += 1
     return count
+
+
+# Bootstrap a manifest from raw_html if missing
+def bootstrap_manifest_from_raw(assets_dir: str) -> int:
+    raw_dir = os.path.join(assets_dir, "raw_html")
+    manifest_path = os.path.join(assets_dir, CACHE_MANIFEST)
+    if not os.path.isdir(raw_dir):
+        return 0
+    names = [n for n in os.listdir(raw_dir) if n.endswith(".html")]
+    if not names:
+        return 0
+    written = 0
+    os.makedirs(assets_dir, exist_ok=True)
+    with open(manifest_path, "w", encoding="utf-8") as mf:
+        for name in names:
+            doc_id = os.path.splitext(name)[0]
+            raw_path = os.path.join(raw_dir, name)
+            try:
+                with open(raw_path, "r", encoding="utf-8") as rf:
+                    html = rf.read()
+            except Exception:
+                continue
+            url = infer_url_from_html(html)
+            if not url:
+                # Fallback to a stable synthetic URL so downstream steps can proceed
+                url = f"about:blank#{doc_id}"
+            mf.write(json.dumps({
+                "doc_id": doc_id,
+                "url": url,
+                "raw_html_path": raw_path
+            }, ensure_ascii=False) + "\n")
+            written += 1
+    if written:
+        print(f"Bootstrapped manifest from raw_html: {written} entries → {manifest_path}")
+    return written
+
+# Helper: Re-parse JSONL from cached HTML using the manifest
+def reparse_from_assets(assets_dir: str, out_path: str, parser: Parser, min_chars: int = 0) -> int:
+    """Rebuild parsed JSONL entirely from cached HTML using the cache manifest.
+    If the manifest is missing, attempt to create it from assets/raw_html.
+    """
+    manifest_path = os.path.join(assets_dir, CACHE_MANIFEST)
+    if not os.path.isfile(manifest_path):
+        made = bootstrap_manifest_from_raw(assets_dir)
+        if not made:
+            print(f"No cache manifest found at {manifest_path} and no raw_html to bootstrap. Nothing to reparse.")
+            return 0
+    seen: set[str] = set()
+    written = 0
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fout, open(manifest_path, "r", encoding="utf-8") as mf:
+        for line in mf:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            doc_id = row.get("doc_id"); url = row.get("url"); raw_path = row.get("raw_html_path")
+            if not doc_id or not url or not raw_path or not os.path.isfile(raw_path):
+                continue
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            try:
+                with open(raw_path, "r", encoding="utf-8") as rf:
+                    html = rf.read()
+            except Exception:
+                continue
+            rec = parser.parse_article(html, url)
+            rec["url"] = url
+            rec["doc_id"] = doc_id
+            rec["raw_html"] = html
+            if rec.get("char_len", 0) < min_chars:
+                continue
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            written += 1
+    print(f"Re-parsed {written} records from assets → {out_path}")
+    return written
 
 def chunk_from_parsed(parsed_jsonl: str, out_chunks: str, chunker: Chunker, site_default: t.Optional[str], assets_dir: str) -> int:
     os.makedirs(os.path.dirname(out_chunks) or ".", exist_ok=True)
@@ -497,7 +641,7 @@ def chunk_from_parsed(parsed_jsonl: str, out_chunks: str, chunker: Chunker, site
             section = breadcrumbs[-1] if breadcrumbs else ""
             updated_at = rec.get("updated_at")
             site = site_default or urlparse(url).netloc
-            doc_id = rec.get("doc_id") or Chunker._doc_id(url)
+            doc_id = rec.get("doc_id") or url_to_docid(url)
 
             raw_html_path, plain_text_path = chunker.save_assets(rec, assets_dir)
             # do not persist raw_html blob inside JSONL
@@ -559,6 +703,8 @@ def load_config(path: str) -> t.Tuple[CrawlConfig, OutputConfig, ChunkConfig]:
         timeout_seconds=float(c.get("timeout_seconds", 10.0)),
         user_agent=c.get("user_agent", "RAG-DiscoveryBot/1.0"),
         crawl_as_human=bool(c.get("crawl_as_human", False)),
+        force_redownload_from_web=bool(c.get("force_redownload_from_web", False)),
+        force_reparse_from_assets=bool(c.get("force_reparse_from_assets", False)),
     )
     out_cfg = OutputConfig(
         assets_dir=o.get("assets_dir", "assets"),
@@ -573,28 +719,38 @@ def load_config(path: str) -> t.Tuple[CrawlConfig, OutputConfig, ChunkConfig]:
     )
     return crawl_cfg, out_cfg, chunk_cfg
 
-def cleanup_outputs(out_cfg: OutputConfig):
-    if out_cfg.fresh_run:
-        ts = str(int(time.time()))
-        archive_root = os.path.join("archive", ts)
-        os.makedirs(archive_root, exist_ok=True)
-        # Move assets dir if exists
+def cleanup_outputs(out_cfg: OutputConfig, mode: str):
+    if not out_cfg.fresh_run:
+        return
+    ts = str(int(time.time()))
+    archive_root = os.path.join("archive", ts)
+    os.makedirs(archive_root, exist_ok=True)
+
+    def mv(path: str):
         try:
-            if os.path.isdir(out_cfg.assets_dir):
-                dest = os.path.join(archive_root, os.path.basename(out_cfg.assets_dir))
-                shutil.move(out_cfg.assets_dir, dest)
-                print(f"Archived dir: {out_cfg.assets_dir} -> {dest}")
+            if os.path.isdir(path):
+                dest = os.path.join(archive_root, os.path.basename(path))
+                shutil.move(path, dest)
+                print(f"Archived dir: {path} -> {dest}")
+            elif os.path.isfile(path):
+                dest = os.path.join(archive_root, os.path.basename(path))
+                shutil.move(path, dest)
+                print(f"Archived file: {path} -> {dest}")
         except FileNotFoundError:
             pass
-        # Move JSONL outputs if exist
-        for p in (out_cfg.parsed_jsonl_path, out_cfg.chunks_jsonl_path):
-            try:
-                if os.path.isfile(p):
-                    dest = os.path.join(archive_root, os.path.basename(p))
-                    shutil.move(p, dest)
-                    print(f"Archived file: {p} -> {dest}")
-            except FileNotFoundError:
-                pass
+
+    # Archive only what is safe/needed for the specific mode
+    if mode == "online":
+        mv(out_cfg.assets_dir)
+        mv(out_cfg.parsed_jsonl_path)
+        mv(out_cfg.chunks_jsonl_path)
+    elif mode == "reparse":
+        # We need assets to remain; archive parsed and chunks only
+        mv(out_cfg.parsed_jsonl_path)
+        mv(out_cfg.chunks_jsonl_path)
+    elif mode == "offline":
+        # We reuse assets + parsed; archive chunks only
+        mv(out_cfg.chunks_jsonl_path)
 
 def summarize_discovery(discovered: t.List[str], skip_reasons: t.Dict[str, str]):
     print(f"Discovered {len(discovered)} pages")
@@ -646,49 +802,90 @@ def main():
 
     crawl_cfg, out_cfg, chunk_cfg = load_config(args.config)
 
-    # fresh run cleanup
-    cleanup_outputs(out_cfg)
+    # Decide run mode first
+    has_parsed = os.path.isfile(out_cfg.parsed_jsonl_path)
+    raw_dir = os.path.join(out_cfg.assets_dir, "raw_html")
+    has_assets = os.path.isdir(out_cfg.assets_dir) and os.path.isdir(raw_dir)
+    has_manifest = os.path.isfile(os.path.join(out_cfg.assets_dir, CACHE_MANIFEST))
 
-    # discovery
-    crawler = Crawler(crawl_cfg)
-    # Preflight diagnostics: check seeds against robots/patterns
-    if not preflight_report(crawler):
+    mode = "online"
+    if crawl_cfg.force_reparse_from_assets:
+        mode = "reparse"
+    elif (not crawl_cfg.force_redownload_from_web) and has_parsed:
+        mode = "offline"
+    elif (not has_parsed) and has_assets:
+        # Safer default: if we have cached HTML/assets but no parsed file, prefer reparse
+        mode = "reparse"
+        print("Auto mode: parsed JSONL missing but cached assets found → switching to 'reparse' mode.")
+
+    print(f"Run mode: {mode}")
+
+    # Archive according to mode (if fresh_run)
+    cleanup_outputs(out_cfg, mode)
+
+    # Discovery/fetch/parse, depending on mode
+    if mode == "online":
+        crawler = Crawler(crawl_cfg)
+        # Preflight diagnostics only for online
+        if not preflight_report(crawler):
+            # If robots block us but we have assets, fall back to reparse without touching network
+            if has_assets:
+                print("Preflight blocked by robots, but assets exist → falling back to 'reparse' mode.")
+                parser = Parser()
+                _ = reparse_from_assets(
+                    assets_dir=out_cfg.assets_dir,
+                    out_path=out_cfg.parsed_jsonl_path,
+                    parser=parser,
+                    min_chars=0,
+                )
+            else:
+                return
+        else:
+            discovered, graph, skips = crawler.discover()
+            summarize_discovery(discovered, skips)
+            if not discovered:
+                print("No pages discovered — adjust allow/deny patterns or seeds.")
+                return
+            parser = Parser()
+            kept = fetch_and_parse_many(
+                discovered,
+                crawler,
+                parser,
+                out_path=out_cfg.parsed_jsonl_path,
+                assets_dir=out_cfg.assets_dir,
+                max_items=crawl_cfg.max_pages,
+            )
+            print(f"\nParsed & saved {kept} records to {out_cfg.parsed_jsonl_path}")
+            try:
+                with open(out_cfg.parsed_jsonl_path, "r", encoding="utf-8") as f:
+                    sample = json.loads(next(iter(f)))
+                    print("Sample record:")
+                    print(" Title:", sample.get("title"))
+                    print(" Updated:", sample.get("updated_at"))
+                    print(" URL:", sample.get("url"))
+                    print(" Body preview:", (sample.get("body_text") or "")[:200].replace("\n", " "), "...")
+            except Exception:
+                pass
+    elif mode == "reparse":
+        print("force_reparse_from_assets=True → rebuilding parsed JSONL from assets cache…")
+        parser = Parser()
+        rebuilt = reparse_from_assets(
+            assets_dir=out_cfg.assets_dir,
+            out_path=out_cfg.parsed_jsonl_path,
+            parser=parser,
+            min_chars=0,
+        )
+        if rebuilt == 0:
+            print("Reparse produced 0 records. Ensure assets/raw_html exists or restore a parsed JSONL from archive.")
+    else:
+        # offline mode (reuse parsed JSONL)
+        print("Offline mode: using existing parsed JSONL; skipping robots/discovery.")
+
+    # chunk & enrich for all modes (parsed JSONL must exist by now)
+    if not os.path.isfile(out_cfg.parsed_jsonl_path):
+        print("ERROR: parsed JSONL not found; cannot chunk.")
         return
-
-    discovered, graph, skips = crawler.discover()
-    summarize_discovery(discovered, skips)
-
-    if not discovered:
-        print("No pages discovered — adjust allow/deny patterns or seeds.")
-        return
-
-    # parse & clean
-    parser = Parser()
-    kept = fetch_and_parse_many(
-        discovered,
-        crawler,
-        parser,
-        out_path=out_cfg.parsed_jsonl_path,
-        assets_dir=out_cfg.assets_dir,
-        max_items=crawl_cfg.max_pages,
-    )
-    print(f"\nParsed & saved {kept} records to {out_cfg.parsed_jsonl_path}")
-
-    # peek
-    try:
-        with open(out_cfg.parsed_jsonl_path, "r", encoding="utf-8") as f:
-            sample = json.loads(next(iter(f)))
-            print("Sample record:")
-            print(" Title:", sample.get("title"))
-            print(" Updated:", sample.get("updated_at"))
-            print(" URL:", sample.get("url"))
-            print(" Body preview:", (sample.get("body_text") or "")[:200].replace("\n", " "), "...")
-    except Exception:
-        pass
-
-    # chunk & enrich
     chunker = Chunker(chunk_cfg)
-    # propagate human-mode to chunker for verbose progress
     setattr(chunker, "_human_mode", bool(crawl_cfg.crawl_as_human))
     n_chunks = chunk_from_parsed(
         out_cfg.parsed_jsonl_path,
