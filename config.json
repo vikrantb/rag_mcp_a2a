@@ -15,7 +15,8 @@
     "respect_robots": true,
     "delay_seconds": 0.6,
     "timeout_seconds": 10.0,
-    "user_agent": "RAG-DiscoveryBot/1.0 (+https://yourdomain.example)"
+    "user_agent": "RAG-DiscoveryBot/1.0 (+https://yourdomain.example)",
+    "crawl_as_human": false
   },
   "outputs": {
     "assets_dir": "assets_98point6",

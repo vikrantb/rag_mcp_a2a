@@ -22,7 +22,8 @@ Example config (save as config.json and edit as needed):
     "respect_robots": true,
     "delay_seconds": 0.6,
     "timeout_seconds": 10.0,
-    "user_agent": "RAG-DiscoveryBot/1.0 (+https://yourdomain.example)"
+    "user_agent": "RAG-DiscoveryBot/1.0 (+https://yourdomain.example)",
+    "crawl_as_human": false
   },
   "outputs": {
     "assets_dir": "assets_98point6",
@@ -76,6 +77,7 @@ class CrawlConfig:
     delay_seconds: float = 0.6
     timeout_seconds: float = 10.0
     user_agent: str = "RAG-DiscoveryBot/1.0"
+    crawl_as_human: bool = False
 
 @dataclass
 class OutputConfig:
@@ -122,6 +124,15 @@ class Crawler:
         self.allow_patterns = compile_patterns(cfg.allow_patterns)
         self.deny_patterns = compile_patterns(cfg.deny_patterns)
         self.robots_cache: dict[str, robotparser.RobotFileParser] = {}
+        # Human-mode overrides: slower crawl, ignore robots, friendlier UA
+        if self.cfg.crawl_as_human:
+            self.cfg.respect_robots = False
+            # At least 2s between requests to mimic a human skim
+            self.cfg.delay_seconds = max(self.cfg.delay_seconds, 5.0)
+            # Use a common browser-like UA string (still honest)
+            self.session.headers.update({
+                "User-Agent": self.cfg.user_agent or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            })
 
     # --- robots ---
     def robots_allows(self, url: str) -> bool:
@@ -182,31 +193,47 @@ class Crawler:
             if url in visited:
                 continue
             visited.add(url)
+            if self.cfg.crawl_as_human:
+                print(f"[DISCOVER] depth={depth} visiting: {url}")
 
             # host/domain checks
             if self.cfg.same_host and not same_site_ok(url, self.seed_hosts):
                 skip_reasons[url] = "different_host"
+                if self.cfg.crawl_as_human:
+                    print(f"[DISCOVER]   skip(different_host): {url}")
                 continue
             if self.allowed_domains and not domain_allowed(url, self.allowed_domains):
                 skip_reasons[url] = "outside_allowed_domains"
+                if self.cfg.crawl_as_human:
+                    print(f"[DISCOVER]   skip(outside_allowed_domains): {url}")
                 continue
             if not self.robots_allows(url):
                 skip_reasons[url] = "robots_disallow"
+                if self.cfg.crawl_as_human:
+                    print(f"[DISCOVER]   skip(robots_disallow): {url}")
                 continue
             if any(p.search(url) for p in self.deny_patterns):
                 skip_reasons[url] = "deny_pattern"
+                if self.cfg.crawl_as_human:
+                    print(f"[DISCOVER]   skip(deny_pattern): {url}")
                 continue
             if self.allow_patterns and not any(p.search(url) for p in self.allow_patterns):
                 if url not in self.seed_list:
                     skip_reasons[url] = "no_allow_pattern_match"
+                    if self.cfg.crawl_as_human:
+                        print(f"[DISCOVER]   skip(no_allow_pattern_match): {url}")
                     continue
 
             html = self.fetch_html(url)
             if not html:
                 skip_reasons[url] = "fetch_failed_or_non_html"
+                if self.cfg.crawl_as_human:
+                    print(f"[DISCOVER]   skip(fetch_failed_or_non_html): {url}")
                 continue
 
             discovered.append(url)
+            if self.cfg.crawl_as_human:
+                print(f"[DISCOVER]   ok: {url}")
 
             if depth >= self.cfg.max_depth:
                 continue
@@ -217,9 +244,13 @@ class Crawler:
                     continue
                 if self.cfg.same_host and not same_site_ok(c, self.seed_hosts):
                     skip_reasons[c] = "different_host_child"
+                    if self.cfg.crawl_as_human:
+                        print(f"[DISCOVER]   skip(different_host_child): {c}")
                     continue
                 if self.allowed_domains and not domain_allowed(c, self.allowed_domains):
                     skip_reasons[c] = "outside_allowed_domains_child"
+                    if self.cfg.crawl_as_human:
+                        print(f"[DISCOVER]   skip(outside_allowed_domains_child): {c}")
                     continue
                 if any(p.search(c) for p in self.deny_patterns):
                     continue
@@ -227,6 +258,8 @@ class Crawler:
                     continue
                 graph[url].append(c)
                 q.append((c, depth + 1))
+                if self.cfg.crawl_as_human:
+                    print(f"[QUEUE] depth={depth+1} -> {c}")
 
         # Safety check
         if self.cfg.same_host:
@@ -431,11 +464,19 @@ def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser
         for i, u in enumerate(urls):
             if i >= max_items:
                 break
+            if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
+                print(f"[PARSE] fetching: {u}")
             html = crawler.fetch_html(u)
             if not html:
+                if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
+                    print(f"[PARSE] skip(fetch_fail): {u}")
                 continue
             rec = parser.parse_article(html, u)
+            if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
+                print(f"[PARSE] ok: title='{(rec.get('title') or '')[:60]}' chars={rec.get('char_len',0)}")
             if rec.get("char_len", 0) < 200:
+                if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
+                    print(f"[PARSE] skip(short): {u}")
                 continue
             # attach raw html for asset saving
             rec["raw_html"] = html
@@ -462,6 +503,15 @@ def chunk_from_parsed(parsed_jsonl: str, out_chunks: str, chunker: Chunker, site
             # do not persist raw_html blob inside JSONL
             rec.pop("raw_html", None)
 
+            verbose = False
+            if isinstance(chunker, Chunker):
+                # inherit human-mode setting via heuristic: check for attr on chunker
+                try:
+                    human = getattr(chunker, "_human_mode", False)
+                except Exception:
+                    human = False
+                verbose = human
+
             for idx, chunk in enumerate(chunker.chunk_text(rec.get("body_text", ""))):
                 out = {
                     "chunk_id": f"{doc_id}-{idx}",
@@ -477,6 +527,8 @@ def chunk_from_parsed(parsed_jsonl: str, out_chunks: str, chunker: Chunker, site
                     "raw_html_path": raw_html_path,
                     "plain_text_path": plain_text_path,
                 }
+                if verbose and (idx % 10 == 0):
+                    print(f"[CHUNK] {doc_id} idx={idx} tokens={out['n_tokens']}")
                 f_out.write(json.dumps(out, ensure_ascii=False) + "\n")
                 written += 1
     return written
@@ -506,6 +558,7 @@ def load_config(path: str) -> t.Tuple[CrawlConfig, OutputConfig, ChunkConfig]:
         delay_seconds=float(c.get("delay_seconds", 0.6)),
         timeout_seconds=float(c.get("timeout_seconds", 10.0)),
         user_agent=c.get("user_agent", "RAG-DiscoveryBot/1.0"),
+        crawl_as_human=bool(c.get("crawl_as_human", False)),
     )
     out_cfg = OutputConfig(
         assets_dir=o.get("assets_dir", "assets"),
@@ -522,15 +575,24 @@ def load_config(path: str) -> t.Tuple[CrawlConfig, OutputConfig, ChunkConfig]:
 
 def cleanup_outputs(out_cfg: OutputConfig):
     if out_cfg.fresh_run:
+        ts = str(int(time.time()))
+        archive_root = os.path.join("archive", ts)
+        os.makedirs(archive_root, exist_ok=True)
+        # Move assets dir if exists
         try:
-            shutil.rmtree(out_cfg.assets_dir)
-            print(f"Removed directory: {out_cfg.assets_dir}")
+            if os.path.isdir(out_cfg.assets_dir):
+                dest = os.path.join(archive_root, os.path.basename(out_cfg.assets_dir))
+                shutil.move(out_cfg.assets_dir, dest)
+                print(f"Archived dir: {out_cfg.assets_dir} -> {dest}")
         except FileNotFoundError:
             pass
+        # Move JSONL outputs if exist
         for p in (out_cfg.parsed_jsonl_path, out_cfg.chunks_jsonl_path):
             try:
-                os.remove(p)
-                print(f"Removed file: {p}")
+                if os.path.isfile(p):
+                    dest = os.path.join(archive_root, os.path.basename(p))
+                    shutil.move(p, dest)
+                    print(f"Archived file: {p} -> {dest}")
             except FileNotFoundError:
                 pass
 
@@ -555,7 +617,7 @@ def preflight_report(crawler: Crawler) -> bool:
         reasons = []
         host_ok = same_site_ok(s, crawler.seed_hosts) if crawler.cfg.same_host else True
         dom_ok = domain_allowed(s, crawler.allowed_domains) if crawler.allowed_domains else True
-        robots_ok = crawler.robots_allows(s)
+        robots_ok = True if crawler.cfg.crawl_as_human else crawler.robots_allows(s)
         deny_hit = any(p.search(s) for p in crawler.deny_patterns)
         allow_hit = (not crawler.allow_patterns) or any(p.search(s) for p in crawler.allow_patterns) or (s in crawler.seed_list)
 
@@ -626,6 +688,8 @@ def main():
 
     # chunk & enrich
     chunker = Chunker(chunk_cfg)
+    # propagate human-mode to chunker for verbose progress
+    setattr(chunker, "_human_mode", bool(crawl_cfg.crawl_as_human))
     n_chunks = chunk_from_parsed(
         out_cfg.parsed_jsonl_path,
         out_cfg.chunks_jsonl_path,
