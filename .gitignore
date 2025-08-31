@@ -14,3 +14,4 @@ assets_98point6/
 parsed_98point6.jsonl
 chunks_98point6.jsonl
 *.log
+index/
