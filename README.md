@@ -1,5 +1,4 @@
-a
-# RAG · MCP · A2A — Weekend-Scale Demo Kit
+# Your personal help desk 
 
 A clean, small toolkit to:
 
@@ -23,7 +22,7 @@ python3 -m venv .venv && source .venv/bin/activate
 bash dependencies.sh
 
 # 2) Configure a crawl (see config section)
-cp 98point6_config.json example_config.json   # or create your own
+cp {company_name}_config.json example_config.json   # or create your own
 
 # 3) Crawl / parse / chunk (or re-use cached HTML)
 python web_crawler.py --config example_config.json
