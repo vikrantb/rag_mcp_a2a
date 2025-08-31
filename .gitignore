@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Crawl/demo outputs
+assets_98point6/
+parsed_98point6.jsonl
+chunks_98point6.jsonl
+*.log
