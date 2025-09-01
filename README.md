@@ -1,30 +1,31 @@
-# Your personal help desk 
+
+# Help Desk Knowledge Retrieval Toolkit
 
 A clean, small toolkit to:
 
-- **Crawl** a public help center or docs site (politely, or in a human-like mode)
-- **Parse → chunk → index** content for hybrid retrieval (BM25 + vectors)
-- **Query locally** (keyword, vector, or hybrid with rerank)
-- **Run a tiny eval** (3–20 golden Qs)
-- (Next steps) expose as **MCP tools**, wrap with an **OpenAI Agents SDK** agent, and add a thin **A2A** façade
+- **Crawl** a public help center or documentation site (polite or human-like mode).
+- **Parse → chunk → index** content for hybrid retrieval (BM25 + vectors).
+- **Query locally** with keyword, vector, or hybrid search and optional rerank.
+- **Run a tiny evaluation** using a handful of golden questions (3–20).
+- **Next steps**: expose as multi-tenant MCP tools, wrap with an OpenAI Agents SDK agent, and add a thin A2A façade.
 
-> ⚠️ This repo avoids any customer names or proprietary content. Use only public pages you’re allowed to crawl.
+This toolkit helps you build an in-house knowledge retrieval system by crawling, parsing, and indexing public help-center documentation. It supports hybrid retrieval combining keyword and vector search for efficient question answering and includes simple tools for evaluating retrieval quality. Use it to collect public documentation and build local indexes that you can query without relying on external services.
 
 ---
 
 ## Quickstart
 
 ```bash
-# 0) Create and activate a venv (optional)
+# 0) Create and activate a virtual environment (optional)
 python3 -m venv .venv && source .venv/bin/activate
 
-# 1) Install deps
+# 1) Install dependencies
 bash dependencies.sh
 
 # 2) Configure a crawl (see config section)
-cp {company_name}_config.json example_config.json   # or create your own
+cp <company_name>_config.json example_config.json   # or create your own
 
-# 3) Crawl / parse / chunk (or re-use cached HTML)
+# 3) Crawl / parse / chunk (or reuse cached HTML)
 python web_crawler.py --config example_config.json
 
 # 4) Build an index (BM25 + FAISS)
@@ -36,7 +37,7 @@ python query_local.py --query "Where is X?" --index index --chunks chunks_<site>
 # 6) (Optional) Rerank
 python query_local.py --query "What can I do in the Console?" --rerank --index index --chunks chunks_<site>.jsonl
 
-# 7) (Optional) Tiny eval
+# 7) (Optional) Tiny evaluation
 python eval_runner.py --golden eval_golden.jsonl
 ```
 
@@ -98,31 +99,23 @@ You pass a single JSON config to `web_crawler.py`. Keep it small and explicit.
 
 ### Key flags & modes
 
-- `crawl_as_human`  
-  If **true**, the crawler **ignores robots.txt** and moves slowly (≈2s think time per page). Use only on sites where you have permission. Progress is streamed in one‑line messages; content is cached incrementally so you don’t lose work.
+- `crawl_as_human` — If **true**, the crawler ignores robots.txt and moves slowly (≈2s think time per page). Use only on sites where you have permission. Progress is streamed in one‑line messages; content is cached incrementally so you don’t lose work.
 
-- `respect_robots`  
-  If **true** and robots disallows your seeds, the script will **not crawl**. If you already have cached HTML, it will automatically fall back to **reparse** (offline) mode.
+- `respect_robots` — If **true** and robots disallows your seeds, the script will not crawl. If you already have cached HTML, it will automatically fall back to **reparse** (offline) mode.
 
-- `force_redownload_from_web`  
-  If **true**, do a brand‑new crawl from the network (archives previous outputs). If **false** and cache exists, reuse the cache.
+- `force_redownload_from_web` — If **true**, do a brand‑new crawl from the network (archives previous outputs). If **false** and cache exists, reuse the cache.
 
-- `force_reparse_from_assets`  
-  If **true**, skip crawling; rebuild `parsed_*.jsonl` from cached HTML (`assets_*/raw_html`). If a manifest is missing, it is bootstrapped automatically.
+- `force_reparse_from_assets` — If **true**, skip crawling; rebuild `parsed_*.jsonl` from cached HTML (`assets_*/raw_html`). If a manifest is missing, it is bootstrapped automatically.
 
-- `fresh_run`  
-  Moves only the **outputs that would be regenerated** into `archive/<epoch>/...`. Cached HTML is preserved unless you explicitly choose an online crawl that replaces it.
+- `fresh_run` — Moves only the outputs that would be regenerated into `archive/<epoch>/...`. Cached HTML is preserved unless you explicitly choose an online crawl that replaces it.
 
 ### Output files
 
-- **assets_dir**  
-  `raw_html/` and `plain_text/` snapshots plus a minimal `cache_manifest.jsonl` (URL, path, timestamp).
+- **assets_dir** — Contains `raw_html/` and `plain_text/` snapshots plus a minimal `cache_manifest.jsonl` (URL, path, timestamp).
 
-- **parsed_jsonl_path**  
-  One JSON object per page: `{url, title, updated_at?, breadcrumbs?, body_text, html?}`.
+- **parsed_jsonl_path** — One JSON object per page: `{url, title, updated_at?, breadcrumbs?, body_text, html?}`.
 
-- **chunks_jsonl_path**  
-  Passages after splitting: `{url, title, section?, updated_at?, site, chunk_id, text}`.
+- **chunks_jsonl_path** — Passages after splitting: `{url, title, section?, updated_at?, site, chunk_id, text}`.
 
 ---
 
@@ -131,8 +124,8 @@ You pass a single JSON config to `web_crawler.py`. Keep it small and explicit.
 **Goal:** fast, cheap, high‑recall retrieval on small/medium doc sets.
 
 - **BM25 (keyword)** surfaces exact term matches and handles rare tokens, URLs, and code‑like snippets well.
-- **Vectors (FAISS + small embedding model)** capture semantic similarity when wording differs. Defaults target an English corpus and keep footprint light.
-- **Hybrid fusion** (query both → merge → optional rerank) gives a strong baseline without heavy infra. You can:
+- **Vectors (FAISS + a small embedding model)** capture semantic similarity when wording differs. Defaults target an English corpus and keep footprint light.
+- **Hybrid fusion** (query both → merge → optional rerank) gives a strong baseline without heavy infrastructure. You can:
   - swap FAISS for **Qdrant**, **pgvector**, or **Milvus**
   - swap embeddings for an API (e.g., OpenAI text‑embedding) or another local model
   - tune chunk sizes/overlap and metadata to fit your corpus
@@ -144,7 +137,7 @@ You pass a single JSON config to `web_crawler.py`. Keep it small and explicit.
 ## Building the index
 
 ```bash
-# Build/refresh index from chunks
+# Build or refresh an index from chunks
 python index_build.py --chunks chunks_<site>.jsonl --out index
 
 # What gets written
@@ -154,7 +147,7 @@ python index_build.py --chunks chunks_<site>.jsonl --out index
 #  - index/model.txt           (embedding model id)
 ```
 
-To change embedding model or storage backend, edit the top of `index_build.py` (model name, dimension) and rerun.
+To change the embedding model or storage backend, edit the top of `index_build.py` (model name, dimension) and rerun.
 
 ---
 
@@ -200,9 +193,9 @@ Use this to compare: baseline vs. rerank, different chunk sizes, different model
 
 ## Operational notes
 
-- **Polite crawling**: keep `respect_robots=true` for public sites you don’t own. Use `crawl_as_human=true` **only** where you have explicit permission.
+- **Polite crawling**: keep `respect_robots=true` for public sites you don’t own. Use `crawl_as_human=true` only where you have explicit permission.
 - **Idempotent runs**: outputs are archived under `archive/<epoch>/...`; caches are reused unless you force a new crawl.
-- **Deterministic chunking**: chunk boundaries are text‑based so repeated runs are stable unless you change the tokenizer/params.
+- **Deterministic chunking**: chunk boundaries are text‑based so repeated runs are stable unless you change the tokenizer or parameters.
 - **Portability**: everything is file‑based (JSONL + index dir). Easy to zip, move, and rebuild elsewhere.
 
 ---
@@ -222,17 +215,21 @@ Use this to compare: baseline vs. rerank, different chunk sizes, different model
 
 ## FAQ
 
-**Can I use another vector DB?**  
+**Can I use another vector DB?**
+
 Yes. Replace FAISS calls with Qdrant/pgvector/Milvus; keep the same chunk schema.
 
-**How do I avoid recrawling?**  
-Set `force_redownload_from_web=false`. If parsed JSON is missing but you have `assets_*/raw_html`, the script will auto‑**reparse**.
+**How do I avoid recrawling?**
 
-**What about non‑English?**  
+Set `force_redownload_from_web=false`. If parsed JSON is missing but you have `assets_*/raw_html`, the script will auto‑reparse.
+
+**What about non‑English?**
+
 Swap to a multilingual embedding model and revisit token chunk sizes.
 
-**What’s the license?**  
-Choose a permissive license suitable for your use case (MIT/Apache‑2 recommended). Add it to the repo root.
+**What’s the license?**
+
+Choose a permissive license suitable for your use case (MIT or Apache‑2 recommended). Add it to the repo root.
 
 ---
 
