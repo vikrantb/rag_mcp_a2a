@@ -5,6 +5,26 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
+# === Per-customer config helpers ===
+def load_query_config(cfg_path: str) -> dict:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    # allow either top-level or nested under "query"
+    return raw.get("query", raw)
+
+
+def resolve_from_config(qcfg: dict, cli_index: str | None, cli_chunks: str | None,
+                        cli_k: int | None, cli_topn: int | None, cli_rerank: bool | None):
+    base_dir = qcfg.get("base_dir", ".")
+    index_dir = cli_index or os.path.join(base_dir, qcfg.get("index_dir", "index"))
+    chunks_path = cli_chunks or os.path.join(base_dir, qcfg.get("chunks_file", "chunks.jsonl"))
+    k = cli_k if cli_k is not None else int(qcfg.get("k", 20))
+    topn = cli_topn if cli_topn is not None else int(qcfg.get("topn", 4))
+    rerank = bool(cli_rerank) or bool(qcfg.get("rerank", False))
+    dense_model = qcfg.get("dense_model")  # optional override
+    cross_encoder = qcfg.get("cross_encoder", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return index_dir, chunks_path, k, topn, rerank, dense_model, cross_encoder
+
 def load_index(index_dir: str):
     index_dir = Path(index_dir)
     with open(index_dir/"bm25.pkl","rb") as f:
@@ -65,19 +85,36 @@ def load_chunk_texts(chunks_path: str):
     return texts
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Hybrid query → (optional) rerank → print top docs")
-    ap.add_argument("--index", default="index", help="Index folder with bm25.pkl, faiss.index, meta.jsonl, model.txt")
-    ap.add_argument("--chunks", default="chunks_98point6.jsonl", help="Chunks JSONL containing text bodies")
+    ap = argparse.ArgumentParser(description="Hybrid query → (optional) rerank. Supports per-customer --config so you don't repeat paths.")
+    ap.add_argument("--config", help="Path to per-customer query config JSON (e.g., 98point6/query_config.json)")
+    ap.add_argument("--index", default=None, help="Index folder; if omitted, read from --config")
+    ap.add_argument("--chunks", default=None, help="Chunks JSONL; if omitted, read from --config")
     ap.add_argument("--query", required=True, help="Your question")
     ap.add_argument("--k", type=int, default=20, help="Candidate pool size")
     ap.add_argument("--topn", type=int, default=4, help="Final top N to display")
     ap.add_argument("--rerank", action="store_true", help="Use CrossEncoder reranker (slower, better)")
     args = ap.parse_args()
 
+    # Resolve paths and parameters from optional config
+    dense_model_override = None
+    cross_encoder_name = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    if args.config:
+        qcfg = load_query_config(args.config)
+        args.index, args.chunks, args.k, args.topn, args.rerank, dense_model_override, cross_encoder_name = (
+            resolve_from_config(qcfg, args.index, args.chunks, args.k, args.topn, args.rerank)
+        )
+    # Fallback defaults if still missing
+    if args.index is None:
+        args.index = "index"
+    if args.chunks is None:
+        args.chunks = "chunks.jsonl"
+
     bm25, tokenized, faiss_idx, model_name, meta = load_index(args.index)
     texts = load_chunk_texts(args.chunks)
 
-    dense_encoder = SentenceTransformer(model_name)
+    # Allow config to override the encoder used for query embeddings; otherwise use the one saved with the index
+    encoder_name = dense_model_override or model_name
+    dense_encoder = SentenceTransformer(encoder_name)
     bm25_idx, bm25_scores = bm25_topk(bm25, tokenized, args.query, k=args.k)
     dense_idx, dense_scores = dense_topk(faiss_idx, dense_encoder, args.query, k=args.k)
     cand_ids = gather_candidates(bm25_idx, bm25_scores, dense_idx, dense_scores, alpha=0.5, topk=args.k)
@@ -88,7 +125,7 @@ if __name__ == "__main__":
             meta[i]["text"] = texts[i]
 
     if args.rerank:
-        reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        reranker = CrossEncoder(cross_encoder_name)
         pairs = [[args.query, meta[i]["text"]] for i in cand_ids]
         scores = reranker.predict(pairs)
         reranked = [i for i,_ in sorted(zip(cand_ids, scores), key=lambda x: x[1], reverse=True)]

@@ -11,6 +11,7 @@ Run:
 
 Example config (save as 98point6_config.json and edit as needed):
 {
+  "profile": {"name": "98point6"},
   "crawl": {
     "seed_urls": ["https://help.98point6.com/"],
     "allow_patterns": ["/td/"],
@@ -28,9 +29,9 @@ Example config (save as 98point6_config.json and edit as needed):
     "force_reparse_from_assets": false
   },
   "outputs": {
-    "assets_dir": "assets_98point6",
-    "parsed_jsonl_path": "parsed_98point6.jsonl",
-    "chunks_jsonl_path": "chunks_98point6.jsonl",
+    "assets_dir": "98point6/assets",
+    "parsed_jsonl_path": "98point6/parsed.jsonl",
+    "chunks_jsonl_path": "98point6/chunks.jsonl",
     "fresh_run": true
   },
   "chunk": {
@@ -41,7 +42,6 @@ Example config (save as 98point6_config.json and edit as needed):
 }
 """
 
-# ===== utils & imports =====
 import os
 import re
 import json
@@ -61,11 +61,10 @@ except ImportError:
     raise SystemExit("Please `pip install requests`.")
 
 try:
-    from bs4 import BeautifulSoup  # optional but recommended
+    from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
 
-# ===== config types =====
 @dataclass
 class CrawlConfig:
     seed_urls: t.List[str]
@@ -96,11 +95,12 @@ class ChunkConfig:
     overlap_tokens: int = 100
     site: t.Optional[str] = None
 
-#
-# ===== helpers =====
+@dataclass
+class ProfileConfig:
+    name: str = "default"
 
-# Manifest file for cached HTML assets
 CACHE_MANIFEST = "cache_manifest.jsonl"
+
 def canonicalize(u: str) -> str:
     p = urlparse(u)
     if p.scheme not in ("http", "https"):
@@ -118,11 +118,9 @@ def same_site_ok(url: str, seed_hosts: t.Set[str]) -> bool:
 def compile_patterns(patterns: t.List[str]) -> t.List[re.Pattern]:
     return [re.compile(p) for p in patterns]
 
-# Consistent docid for URL (used for cache and assets)
 def url_to_docid(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
 
-# Infer canonical URL from HTML (og:url or <link rel="canonical">)
 def infer_url_from_html(html: str) -> t.Optional[str]:
     try:
         if BeautifulSoup is None:
@@ -138,7 +136,6 @@ def infer_url_from_html(html: str) -> t.Optional[str]:
         pass
     return None
 
-# ===== crawler =====
 class Crawler:
     def __init__(self, cfg: CrawlConfig):
         self.cfg = cfg
@@ -152,17 +149,13 @@ class Crawler:
         self.allow_patterns = compile_patterns(cfg.allow_patterns)
         self.deny_patterns = compile_patterns(cfg.deny_patterns)
         self.robots_cache: dict[str, robotparser.RobotFileParser] = {}
-        # Human-mode overrides: slower crawl, ignore robots, friendlier UA
         if self.cfg.crawl_as_human:
             self.cfg.respect_robots = False
-            # At least 2s between requests to mimic a human skim
             self.cfg.delay_seconds = max(self.cfg.delay_seconds, 2.0)
-            # Use a common browser-like UA string (still honest)
             self.session.headers.update({
                 "User-Agent": self.cfg.user_agent or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
             })
 
-    # --- robots ---
     def robots_allows(self, url: str) -> bool:
         if not self.cfg.respect_robots:
             return True
@@ -182,7 +175,6 @@ class Crawler:
         except Exception:
             return True
 
-    # --- fetch ---
     def fetch_html(self, url: str) -> t.Optional[str]:
         try:
             resp = self.session.get(url, timeout=self.cfg.timeout_seconds)
@@ -197,7 +189,6 @@ class Crawler:
         except requests.RequestException:
             return None
 
-    # --- link extraction ---
     def extract_links(self, html: str, base_url: str) -> t.List[str]:
         links: t.List[str] = []
         if BeautifulSoup is not None:
@@ -224,7 +215,6 @@ class Crawler:
             if self.cfg.crawl_as_human:
                 print(f"[DISCOVER] depth={depth} visiting: {url}")
 
-            # host/domain checks
             if self.cfg.same_host and not same_site_ok(url, self.seed_hosts):
                 skip_reasons[url] = "different_host"
                 if self.cfg.crawl_as_human:
@@ -289,7 +279,6 @@ class Crawler:
                 if self.cfg.crawl_as_human:
                     print(f"[QUEUE] depth={depth+1} -> {c}")
 
-        # Safety check
         if self.cfg.same_host:
             other_hosts = {urlparse(u).netloc.lower() for u in discovered if urlparse(u).netloc.lower() not in self.seed_hosts}
             if other_hosts:
@@ -297,7 +286,6 @@ class Crawler:
 
         return discovered, graph, skip_reasons
 
-# ===== parser =====
 class Parser:
     def __init__(self):
         if BeautifulSoup is None:
@@ -336,7 +324,7 @@ class Parser:
         meta = soup.find("meta", attrs={"property": "og:title"})
         if meta and meta.get("content"):
             return meta["content"].strip()
-        h1 = soup.find(["h1", "h2"])  # some KBs use h2
+        h1 = soup.find(["h1", "h2"])
         if h1:
             return h1.get_text(" ", strip=True)
         if soup.title and soup.title.string:
@@ -392,11 +380,11 @@ class Parser:
         lines: t.List[str] = []
         for el in container.descendants:
             name = getattr(el, "name", None)
-            if name in {"h1","h2","h3","h4","h5"}:
+            if name in {"h1", "h2", "h3", "h4", "h5"}:
                 level = int(name[1])
                 txt = el.get_text(" ", strip=True)
                 if txt:
-                    lines.append("#"*level + " " + txt)
+                    lines.append("#" * level + " " + txt)
             elif name == "p":
                 txt = el.get_text(" ", strip=True)
                 if txt:
@@ -405,7 +393,7 @@ class Parser:
                 txt = el.get_text(" ", strip=True)
                 if txt:
                     lines.append("- " + txt)
-            elif name in {"pre","code"}:
+            elif name in {"pre", "code"}:
                 txt = el.get_text("\n", strip=True)
                 if txt:
                     lines.append("```\n" + txt + "\n```")
@@ -434,7 +422,6 @@ class Parser:
             "char_len": len(body_text),
         }
 
-# ===== chunker =====
 class Chunker:
     def __init__(self, cfg: ChunkConfig):
         self.cfg = cfg
@@ -484,9 +471,9 @@ class Chunker:
                 tf.write(rec.get("body_text", ""))
         return raw_html_path, plain_text_path
 
-# ===== pipeline ops =====
 def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser, out_path: str, assets_dir: str, max_items: int = 100) -> int:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    os.makedirs(assets_dir, exist_ok=True)
     count = 0
     manifest_path = os.path.join(assets_dir, CACHE_MANIFEST)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -495,7 +482,6 @@ def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser
                 break
             if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
                 print(f"[PARSE] fetching: {u}")
-            # Try local cache first if allowed
             docid = url_to_docid(u)
             raw_dir = os.path.join(assets_dir, "raw_html")
             raw_path = os.path.join(raw_dir, f"{docid}.html")
@@ -509,11 +495,9 @@ def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser
                 except Exception:
                     html = None
 
-            # If no cache or forced, fetch from web
             if html is None:
                 html = crawler.fetch_html(u)
                 if html and not crawler.cfg.force_redownload_from_web:
-                    # Persist to cache for future offline runs
                     os.makedirs(raw_dir, exist_ok=True)
                     try:
                         with open(raw_path, "w", encoding="utf-8") as wf:
@@ -526,7 +510,6 @@ def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser
                     print(f"[PARSE] skip(fetch_fail): {u}")
                 continue
 
-            # Record in cache manifest for offline reparse
             try:
                 os.makedirs(assets_dir, exist_ok=True)
                 with open(manifest_path, "a", encoding="utf-8") as mf:
@@ -545,16 +528,12 @@ def fetch_and_parse_many(urls: t.Iterable[str], crawler: Crawler, parser: Parser
                 if isinstance(crawler, Crawler) and crawler.cfg.crawl_as_human:
                     print(f"[PARSE] skip(short): {u}")
                 continue
-            # attach raw html for asset saving
             rec["raw_html"] = html
             rec["doc_id"] = url_to_docid(u)
-            # we defer writing raw assets to the chunk/save phase
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             count += 1
     return count
 
-
-# Bootstrap a manifest from raw_html if missing
 def bootstrap_manifest_from_raw(assets_dir: str) -> int:
     raw_dir = os.path.join(assets_dir, "raw_html")
     manifest_path = os.path.join(assets_dir, CACHE_MANIFEST)
@@ -576,7 +555,6 @@ def bootstrap_manifest_from_raw(assets_dir: str) -> int:
                 continue
             url = infer_url_from_html(html)
             if not url:
-                # Fallback to a stable synthetic URL so downstream steps can proceed
                 url = f"about:blank#{doc_id}"
             mf.write(json.dumps({
                 "doc_id": doc_id,
@@ -588,11 +566,7 @@ def bootstrap_manifest_from_raw(assets_dir: str) -> int:
         print(f"Bootstrapped manifest from raw_html: {written} entries → {manifest_path}")
     return written
 
-# Helper: Re-parse JSONL from cached HTML using the manifest
 def reparse_from_assets(assets_dir: str, out_path: str, parser: Parser, min_chars: int = 0) -> int:
-    """Rebuild parsed JSONL entirely from cached HTML using the cache manifest.
-    If the manifest is missing, attempt to create it from assets/raw_html.
-    """
     manifest_path = os.path.join(assets_dir, CACHE_MANIFEST)
     if not os.path.isfile(manifest_path):
         made = bootstrap_manifest_from_raw(assets_dir)
@@ -644,12 +618,10 @@ def chunk_from_parsed(parsed_jsonl: str, out_chunks: str, chunker: Chunker, site
             doc_id = rec.get("doc_id") or url_to_docid(url)
 
             raw_html_path, plain_text_path = chunker.save_assets(rec, assets_dir)
-            # do not persist raw_html blob inside JSONL
             rec.pop("raw_html", None)
 
             verbose = False
             if isinstance(chunker, Chunker):
-                # inherit human-mode setting via heuristic: check for attr on chunker
                 try:
                     human = getattr(chunker, "_human_mode", False)
                 except Exception:
@@ -677,19 +649,21 @@ def chunk_from_parsed(parsed_jsonl: str, out_chunks: str, chunker: Chunker, site
                 written += 1
     return written
 
-# ===== CLI / main =====
 @dataclass
 class FullConfig:
+    profile: ProfileConfig
     crawl: CrawlConfig
     outputs: OutputConfig
     chunk: ChunkConfig
 
-def load_config(path: str) -> t.Tuple[CrawlConfig, OutputConfig, ChunkConfig]:
+def load_config(path: str) -> t.Tuple[ProfileConfig, CrawlConfig, OutputConfig, ChunkConfig]:
     with open(path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    p = cfg.get("profile", {})
     c = cfg.get("crawl", {})
     o = cfg.get("outputs", {})
     k = cfg.get("chunk", {})
+    prof_cfg = ProfileConfig(name=p.get("name", "default"))
     crawl_cfg = CrawlConfig(
         seed_urls=c.get("seed_urls", []),
         allow_patterns=c.get("allow_patterns", []),
@@ -717,39 +691,38 @@ def load_config(path: str) -> t.Tuple[CrawlConfig, OutputConfig, ChunkConfig]:
         overlap_tokens=int(k.get("overlap_tokens", 100)),
         site=k.get("site"),
     )
-    return crawl_cfg, out_cfg, chunk_cfg
+    return prof_cfg, crawl_cfg, out_cfg, chunk_cfg
 
-def cleanup_outputs(out_cfg: OutputConfig, mode: str):
+def cleanup_outputs(out_cfg: OutputConfig, mode: str, profile_name: str = "default"):
     if not out_cfg.fresh_run:
         return
     ts = str(int(time.time()))
-    archive_root = os.path.join("archive", ts)
+    archive_root = os.path.join("archive", ts, profile_name)
     os.makedirs(archive_root, exist_ok=True)
 
     def mv(path: str):
         try:
             if os.path.isdir(path):
-                dest = os.path.join(archive_root, os.path.basename(path))
+                dest = os.path.join(archive_root, path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
                 shutil.move(path, dest)
                 print(f"Archived dir: {path} -> {dest}")
             elif os.path.isfile(path):
-                dest = os.path.join(archive_root, os.path.basename(path))
+                dest = os.path.join(archive_root, path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
                 shutil.move(path, dest)
                 print(f"Archived file: {path} -> {dest}")
         except FileNotFoundError:
             pass
 
-    # Archive only what is safe/needed for the specific mode
     if mode == "online":
         mv(out_cfg.assets_dir)
         mv(out_cfg.parsed_jsonl_path)
         mv(out_cfg.chunks_jsonl_path)
     elif mode == "reparse":
-        # We need assets to remain; archive parsed and chunks only
         mv(out_cfg.parsed_jsonl_path)
         mv(out_cfg.chunks_jsonl_path)
     elif mode == "offline":
-        # We reuse assets + parsed; archive chunks only
         mv(out_cfg.chunks_jsonl_path)
 
 def summarize_discovery(discovered: t.List[str], skip_reasons: t.Dict[str, str]):
@@ -763,10 +736,7 @@ def summarize_discovery(discovered: t.List[str], skip_reasons: t.Dict[str, str])
         for reason, n in cnt.most_common(10):
             print(f"  {reason}: {n}")
 
-
-# ===== diagnostics =====
 def preflight_report(crawler: Crawler) -> bool:
-    """Print a quick diagnostics table for seed URLs. Returns True if at least one seed is crawlable."""
     ok_any = False
     print("Preflight on seeds (robots/patterns):")
     for s in crawler.seed_list:
@@ -793,16 +763,14 @@ def preflight_report(crawler: Crawler) -> bool:
         print("All seeds are blocked. Tip: use a seed URL that is allowed by robots and matches allow_patterns (e.g., a topic page like '/td/').")
     return ok_any
 
-
 def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to JSON config")
     args = ap.parse_args()
 
-    crawl_cfg, out_cfg, chunk_cfg = load_config(args.config)
+    prof_cfg, crawl_cfg, out_cfg, chunk_cfg = load_config(args.config)
 
-    # Decide run mode first
     has_parsed = os.path.isfile(out_cfg.parsed_jsonl_path)
     raw_dir = os.path.join(out_cfg.assets_dir, "raw_html")
     has_assets = os.path.isdir(out_cfg.assets_dir) and os.path.isdir(raw_dir)
@@ -814,21 +782,16 @@ def main():
     elif (not crawl_cfg.force_redownload_from_web) and has_parsed:
         mode = "offline"
     elif (not has_parsed) and has_assets:
-        # Safer default: if we have cached HTML/assets but no parsed file, prefer reparse
         mode = "reparse"
         print("Auto mode: parsed JSONL missing but cached assets found → switching to 'reparse' mode.")
 
     print(f"Run mode: {mode}")
 
-    # Archive according to mode (if fresh_run)
-    cleanup_outputs(out_cfg, mode)
+    cleanup_outputs(out_cfg, mode, prof_cfg.name)
 
-    # Discovery/fetch/parse, depending on mode
     if mode == "online":
         crawler = Crawler(crawl_cfg)
-        # Preflight diagnostics only for online
         if not preflight_report(crawler):
-            # If robots block us but we have assets, fall back to reparse without touching network
             if has_assets:
                 print("Preflight blocked by robots, but assets exist → falling back to 'reparse' mode.")
                 parser = Parser()
@@ -878,10 +841,8 @@ def main():
         if rebuilt == 0:
             print("Reparse produced 0 records. Ensure assets/raw_html exists or restore a parsed JSONL from archive.")
     else:
-        # offline mode (reuse parsed JSONL)
         print("Offline mode: using existing parsed JSONL; skipping robots/discovery.")
 
-    # chunk & enrich for all modes (parsed JSONL must exist by now)
     if not os.path.isfile(out_cfg.parsed_jsonl_path):
         print("ERROR: parsed JSONL not found; cannot chunk.")
         return

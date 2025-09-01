@@ -1,4 +1,5 @@
 {
+  "profile": {"name": "98point6"},
   "crawl": {
     "seed_urls": [
       "https://help.98point6.com/td/",
@@ -29,14 +30,30 @@
     "force_reparse_from_assets": false
   },
   "outputs": {
-    "assets_dir": "assets_98point6",
-    "parsed_jsonl_path": "parsed_98point6.jsonl",
-    "chunks_jsonl_path": "chunks_98point6.jsonl",
+    "assets_dir": "98point6/assets",
+    "parsed_jsonl_path": "98point6/parsed.jsonl",
+    "chunks_jsonl_path": "98point6/chunks.jsonl",
     "fresh_run": true
   },
   "chunk": {
     "target_tokens": 600,
     "overlap_tokens": 100,
     "site": "help.98point6.com"
+  }
+  ,
+  "index": {
+    "out_dir": "98point6/index",
+    "bm25": {
+      "enabled": true,
+      "tokenizer": "simple"
+    },
+    "embedding": {
+      "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+      "batch_size": 64,
+      "normalize": true
+    },
+    "faiss": {
+      "index_type": "IndexFlatIP"
+    }
   }
 }
